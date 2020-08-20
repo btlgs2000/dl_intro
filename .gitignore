@@ -1,1 +1,4 @@
 tensorboard_logs/**
+logs/**
+**/*.pyc
+dogs-vs-cats/**
