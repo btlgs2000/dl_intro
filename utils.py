@@ -22,3 +22,12 @@ def display_samples(X, y, y_hat=None, y_prob=None, n_rows=4, n_cols=4, label=Non
                 ax.imshow(X[idxs[n]], cmap='gray')
             else:
                 ax.bar(range(10), probs[n], color = ['b' if i == true_labels[n] else 'r' for i in range(10)])
+                
+def take_test_samples_idxs(y_prob, y_true, is_correct, most_confident, k):
+    y_hat = np.argmax(y_prob, axis=1)
+    choosable_idxs = np.nonzero(y_hat == y_true)[0] if is_correct else np.nonzero(y_hat != y_true)[0]
+    y_hat_prob = np.amax(y_prob, axis=1)
+    sorted_idxs = np.argsort(y_hat_prob)
+    if most_confident:
+        sorted_idxs = sorted_idxs[::-1]
+    return sorted_idxs[np.isin(sorted_idxs, choosable_idxs)][:k]
