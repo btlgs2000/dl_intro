@@ -1,104 +1,97 @@
 # To add a new cell, type '# %%'
 # To add a new markdown cell, type '# %% [markdown]'
 # %%
+from random import shuffle
 from tensorflow import keras
 import tensorflow as tf
 import numpy as np
 from tensorflow.keras.preprocessing.sequence import pad_sequences
+import tensorflow_datasets as tfds
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, CSVLogger
+from tensorflow.keras.utils import Sequence
 
 import os
 from pathlib import Path
 import string
 import random
 
-CORPUS_FOLDER = r'F:\Documenti\DL_Bergamo\testi_italiano'
+d = tfds.load(name='tiny_shakespeare')['train']
+val = tfds.load(name='tiny_shakespeare')['validation']
+big_string_train = next(iter(d))['text'].numpy().decode("utf-8")
+big_string_val = next(iter(val))['text'].numpy().decode("utf-8")
+chars = set(big_string_train)
+dict_size = len(chars)
 
-class Corpus:
-    def __init__(self, folder):
-        self.folder = folder
-        self.good_chars = string.ascii_lowercase + string.digits + ',.:; \n"'
-        self.load()
-        self.char_to_num_dict, self.num_to_char_dict = self.build_dictionaries()
-        
-    def load(self):
-        big_string = ''
-        folder = Path(self.folder)
-        for file in os.listdir(self.folder):
-            with open(folder / file, 'r', encoding='utf-8') as f:
-                big_string += f.read()
-        big_string = big_string.lower()
-        self.big_string = ''.join([char for char in big_string if char in self.good_chars])
-        self.n = len(self.big_string)
-        
-    def build_dictionaries(self):
-        c_2_n, n_2_c = {}, {}
-        charset = set(self.big_string)
-        for i, char in enumerate(charset):
-            c_2_n[char] = i+1
-            n_2_c[i+1] = char
-        return c_2_n, n_2_c
-        
-    def get_dictionary_cardinality(self):
-        return len(self.char_to_num_dict)
-        
-    def chars_to_nums(self, chars):
-        nums = [self.char_to_num_dict[char] for char in chars]
-        return nums
+def get_temporal_series(l, n):
+    xs = [l[i:i+n] for i in range(len(l)-n)]
+    ys = [l[i+1:i+n+1] for i in range(len(l)-n)]
+    return np.asarray(xs), np.asarray(ys)
     
-    def nums_to_chars(self, nums):
-        chars = [self.num_to_char_dict[num] for num in nums]
-        return ''.join(chars)
+char_to_num = {char: num for (num, char) in enumerate(chars)}
+num_to_char = {num: char for (num, char) in enumerate(chars)}
+
+big_string_train = [char_to_num[char] for char in big_string_train]
+big_string_val = [char_to_num[char] for char in big_string_val]
+
+# x_train, y_train =get_temporal_series(big_string_train, 100)
+# x_val, y_val =get_temporal_series(big_string_val, 100)
+
+class Dataset(Sequence):
+    def __init__(self, x, dict_size, batch_size=32):
+        super().__init__()
+        self.x = x
+        self.dict_size = dict_size
+        self.reset()
         
-    def take_sample(self, length):
-        idx = random.randint(0, self.n-length)
-        chars = self.big_string[idx:idx+length+1]
-        nums = self.chars_to_nums(chars)
-        x, y =  nums[:-1], nums[-1]
-        return x, y
+    def reset(self):
+        n = len(self.x)
+        max_init_idx = n - 100*100 - 100
+        self.current_idx = random.randint(0, max_init_idx)
         
-    def take_batch(self, size, max_len):
+    def __len__(self):
+        return 100
+        
+    def __getitem__(self, idx):
         xs, ys = [], []
-        lengths = random.choices(range(1, max_len+1), k=size)
-        for length in lengths:
-            x, y = self.take_sample(length)
-            xs.append(x)
-            ys.append(y-1)
+        idx = self.current_idx
+        step = 3
+        for idx in (self.current_idx + idx*step for idx in range(0, 32)):
+            xs.append(self.x[idx:idx+100])
+            ys.append(self.x[idx+1:idx+100+1])
         
-        return pad_sequences(xs), tf.one_hot(ys, self.get_dictionary_cardinality())
-        
-        
-
-# %%
-
+        self.current_idx += 100
+        x = np.stack(xs)
+        y = np.stack(ys)
+        return x, tf.one_hot(y, self.dict_size, axis=-1)
     
-
-corpus = Corpus(r'F:\Documenti\DL_Bergamo\testi_italiano')
-
-def generator(corpus=corpus, num_batches=100, batch_size=32, max_seq_len=100):
-    while True:
-        yield corpus.take_batch(batch_size, max_seq_len)
+    def on_epoch_end(self):
+        self.reset()
 
 # %%
-N = corpus.get_dictionary_cardinality()
+N = len(chars)
 model = keras.Sequential(
     [
         keras.Input(batch_size=32, shape=(None,)),
-        keras.layers.Embedding(input_dim=N+1, output_dim=4, mask_zero=True),
-        keras.layers.GRU(512, return_sequences=True),
-        keras.layers.GRU(512, return_sequences=True),
-        keras.layers.GRU(512),
+        keras.layers.Embedding(input_dim=N, output_dim=4, mask_zero=False),
+        keras.layers.GRU(512, return_sequences=True, stateful=True),
+        keras.layers.GRU(512, return_sequences=True, stateful=True),
+        keras.layers.GRU(512, return_sequences=True, stateful=True),
         keras.layers.Dense(N, activation='softmax')
     ]
 )
 
+callbacks = [
+    EarlyStopping(patience=5),
+    CSVLogger('logger.csv'),
+    ModelCheckpoint('checkpoint', save_model=True, restore_model=True)
+]
 
-train_ds = tf.data.Dataset.from_generator(generator, output_types=(tf.float32, tf.float32))
+model.compile(optimizer=keras.optimizers.Adam(learning_rate=1e-2), loss='categorical_crossentropy', metrics=['accuracy'])
 
-val_ds = tf.data.Dataset.from_generator(generator, output_types=(tf.float32, tf.float32))
-
-model.compile(optimizer=keras.optimizers.Adam(learning_rate=1e-2), loss='categorical_crossentropy', metrics=['accuracy'], run_eagerly=True)
+train_ds = Dataset(big_string_train, dict_size)
+val_ds = Dataset(big_string_val, dict_size)
 # %%
-model.fit(x=train_ds, validation_data=val_ds.take(50), epochs=10, steps_per_epoch=100)
+model.fit(x=train_ds, validation_data=val_ds, epochs=10, callbacks=callbacks, shuffle=False)
 model.save('checkpoint.tf')
 # %%
 model = keras.models.load_model('checkpoint.tf')
